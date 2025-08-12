@@ -13,10 +13,10 @@ const ROBUX_AMOUNT_TO_PRICE = 1000;
 // ======================= ¡NOTA DE SEGURIDAD IMPORTANTE! =======================
 // He puesto tus claves aquí para que funcione, pero lo ideal es moverlas a las
 // "Environment Variables" en Render, como te explicaré en los pasos finales.
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8314554439:AAEsxuDSLAUPeYc1_1mNKU3sMkZlB06tSdw';
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '6997258635';
-const CRYPTOMUS_API_KEY = process.env.CRYPTOMUS_API_KEY || 'TU_API_KEY_DE_CRYPTOMUS'; // Reemplazar después
-const CRYPTOMUS_MERCHANT_ID = process.env.CRYPTOMUS_MERCHANT_ID || 'TU_MERCHANT_ID_DE_CRYPTOMUS'; // Reemplazar después
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const CRYPTOMUS_API_KEY = process.env.CRYPTOMUS_API_KEY;
+const CRYPTOMUS_MERCHANT_ID = process.env.CRYPTOMUS_MERCHANT_ID;
 // ==============================================================================
 
 const CHEAPBUX_URL = 'https://www.cheapbux.gg/';
