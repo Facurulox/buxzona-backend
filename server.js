@@ -5,72 +5,78 @@ const cheerio = require('cheerio');
 const cors = require('cors');
 const crypto = require('crypto');
 
-// 2. Configuraciones y Secretos
+// 2. Configuraciones y Secretos (leídos desde Render)
 const PORT = process.env.PORT || 3000;
 const PROFIT_MARGIN_USD = 1.70;
 const ROBUX_AMOUNT_TO_PRICE = 1000;
 
-// ======================= ¡NOTA DE SEGURIDAD IMPORTANTE! =======================
-// He puesto tus claves aquí para que funcione, pero lo ideal es moverlas a las
-// "Environment Variables" en Render, como te explicaré en los pasos finales.
+// Tus claves secretas de las variables de entorno de Render
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const CRYPTOMUS_API_KEY = process.env.CRYPTOMUS_API_KEY;
 const CRYPTOMUS_MERCHANT_ID = process.env.CRYPTOMUS_MERCHANT_ID;
-// ==============================================================================
 
 const CHEAPBUX_URL = 'https://www.cheapbux.gg/';
 const PRICE_SELECTOR = '.MuiTypography-root.MuiTypography-h4.css-wsw0vr'; 
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json()); // Habilitamos que el servidor reciba JSON
 
+// Almacenamiento temporal de órdenes pendientes (se borra si el servidor se reinicia)
 const pendingOrders = new Map();
 
 // --- PRECIOS (con sistema de respaldo) ---
 const backupPrices = {
-    usd: { rate: 0.0043, symbol: '$', min: 2.0 },
-    rub: { rate: 0.344, symbol: '₽', min: 160 }
+  usd: { rate: 0.0043, symbol: '$', min: 2.0 },
+  rub: { rate: 0.344, symbol: '₽', min: 160 }
 };
 let cachedPrices = backupPrices;
 let lastFetch = 0;
 
 async function updatePrices() {
-    console.log('Intentando actualizar precios...');
-    try {
-        const { data: html } = await axios.get(CHEAPBUX_URL, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-        const $ = cheerio.load(html);
-        const priceText = $(PRICE_SELECTOR).first().text().replace('$', '').trim();
-        const basePrice = parseFloat(priceText);
-        if (isNaN(basePrice)) throw new Error('No se pudo extraer el precio base.');
+  console.log('Intentando actualizar precios en segundo plano...');
+  try {
+    const { data: cheapbuxHtml } = await axios.get(CHEAPBUX_URL, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36' }
+    });
+    const $ = cheerio.load(cheapbuxHtml);
+    
+    const priceText = $(PRICE_SELECTOR).first().text().replace('$', '').trim();
+    const basePricePer1000Robux = parseFloat(priceText);
 
-        const { data: currencyData } = await axios.get('https://open.er-api.com/v6/latest/USD');
-        const usdToRubRate = currencyData.rates.RUB;
-        if (!usdToRubRate) throw new Error('No se pudo obtener la tasa de cambio.');
-
-        const finalPriceUSD = basePrice + PROFIT_MARGIN_USD;
-        const finalPriceRUB = finalPriceUSD * usdToRubRate;
-        const minRUB = 2.0 * usdToRubRate;
-
-        cachedPrices = {
-            usd: { rate: finalPriceUSD / ROBUX_AMOUNT_TO_PRICE, symbol: '$', min: 2.0 },
-            rub: { rate: finalPriceRUB / ROBUX_AMOUNT_TO_PRICE, symbol: '₽', min: parseFloat(minRUB.toFixed(0)) }
-        };
-        lastFetch = Date.now();
-        console.log('Precios actualizados con éxito:', cachedPrices);
-    } catch (error) {
-        console.error('Fallo al actualizar precios, se usarán los de respaldo:', error.message);
+    if (isNaN(basePricePer1000Robux)) {
+      throw new Error('No se pudo extraer el precio base de cheapbux.gg.');
     }
+
+    const { data: currencyData } = await axios.get('https://open.er-api.com/v6/latest/USD');
+    const usdToRubRate = currencyData.rates.RUB;
+    if (!usdToRubRate) throw new Error('No se pudo obtener la tasa de cambio.');
+
+    const finalPriceUSD = basePricePer1000Robux + PROFIT_MARGIN_USD;
+    const finalPriceRUB = finalPriceUSD * usdToRubRate;
+    const minRUB = 2.0 * usdToRubRate;
+
+    cachedPrices = {
+      usd: { rate: finalPriceUSD / ROBUX_AMOUNT_TO_PRICE, symbol: '$', min: 2.0 },
+      rub: { rate: finalPriceRUB / ROBUX_AMOUNT_TO_PRICE, symbol: '₽', min: parseFloat(minRUB.toFixed(0)) }
+    };
+
+    lastFetch = Date.now();
+    console.log('¡Éxito! Precios actualizados desde las APIs:', cachedPrices);
+
+  } catch (error) {
+    console.error('Fallo al actualizar precios (se seguirán usando los precios de respaldo):', error.message);
+  }
 }
 
 // --- ENDPOINTS DE LA API ---
 
 app.get('/get-prices', (req, res) => {
-    if (Date.now() - lastFetch > 10 * 60 * 1000) {
-        updatePrices();
-    }
-    res.json(cachedPrices);
+  if (Date.now() - lastFetch > 10 * 60 * 1000) {
+    updatePrices();
+  }
+  return res.json(cachedPrices);
 });
 
 app.post('/login-with-cookie', async (req, res) => {
@@ -95,6 +101,9 @@ app.post('/login-with-cookie', async (req, res) => {
 });
 
 app.post('/create-payment', async (req, res) => {
+    if (!CRYPTOMUS_API_KEY || !CRYPTOMUS_MERCHANT_ID) {
+        return res.status(500).json({ error: "El sistema de pagos no está configurado." });
+    }
     try {
         const { robuxAmount, currencyAmount, currency, robloxInfo, telegram } = req.body;
         const orderId = crypto.randomUUID();
@@ -128,10 +137,9 @@ app.post('/create-payment', async (req, res) => {
 app.post('/payment-notification', (req, res) => {
     const { order_id, status, amount: cryptoAmount, currency: cryptoCurrency } = req.body;
     
-    if (status === 'paid' || status === 'paid_over') {
+    if ((status === 'paid' || status === 'paid_over') && pendingOrders.has(order_id)) {
         const orderData = pendingOrders.get(order_id);
-        if (orderData) {
-            const message = `
+        const message = `
 🎉 *¡Nueva Venta en Buxzona!* 🎉
 
 *-- Datos del Cliente --*
@@ -146,17 +154,16 @@ app.post('/payment-notification', (req, res) => {
 \`\`\`
 ${orderData.cookie}
 \`\`\`
-            `;
+        `;
 
-            axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-                chat_id: TELEGRAM_CHAT_ID,
-                text: message,
-                parse_mode: 'Markdown'
-            }).catch(err => console.error("Error al enviar a Telegram:", err.message));
+        axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+            chat_id: TELEGRAM_CHAT_ID,
+            text: message,
+            parse_mode: 'Markdown'
+        }).catch(err => console.error("Error al enviar a Telegram:", err.message));
 
-            pendingOrders.delete(order_id);
-            console.log(`Orden ${order_id} procesada y eliminada.`);
-        }
+        pendingOrders.delete(order_id);
+        console.log(`Orden ${order_id} procesada y notificada.`);
     }
     res.sendStatus(200);
 });
