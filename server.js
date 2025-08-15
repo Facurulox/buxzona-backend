@@ -28,8 +28,8 @@ const pendingOrders = new Map();
 
 // --- PRECIOS (con sistema de respaldo) ---
 const backupPrices = {
-  usd: { rate: 0.0043, symbol: '$', min: 2.0 },
-  rub: { rate: 0.344, symbol: '₽', min: 160 }
+  usd: { rate: 0.0043, symbol: '$', min: 2.0, max: 180.0 },
+  rub: { rate: 0.344, symbol: '₽', min: 160, max: 14400 }
 };
 let cachedPrices = backupPrices;
 let lastFetch = 0;
@@ -58,8 +58,8 @@ async function updatePrices() {
     const minRUB = 2.0 * usdToRubRate;
 
     cachedPrices = {
-      usd: { rate: finalPriceUSD / ROBUX_AMOUNT_TO_PRICE, symbol: '$', min: 2.0 },
-      rub: { rate: finalPriceRUB / ROBUX_AMOUNT_TO_PRICE, symbol: '₽', min: parseFloat(minRUB.toFixed(0)) }
+      usd: { rate: finalPriceUSD / ROBUX_AMOUNT_TO_PRICE, symbol: '$', min: 2.0, max: 180.0 },
+      rub: { rate: finalPriceRUB / ROBUX_AMOUNT_TO_PRICE, symbol: '₽', min: parseFloat(minRUB.toFixed(0)), max: 180.0 * usdToRubRate }
     };
 
     lastFetch = Date.now();
@@ -77,6 +77,43 @@ app.get('/get-prices', (req, res) => {
     updatePrices();
   }
   return res.json(cachedPrices);
+});
+
+// --- CAMBIO 1: NUEVO ENDPOINT PARA VERIFICAR GAME PASS ---
+app.post('/verify-gamepass', async (req, res) => {
+    const { gamepassUrl, expectedRobux } = req.body;
+
+    if (!gamepassUrl || !expectedRobux) {
+        return res.status(400).json({ success: false, error: 'Faltan datos para la verificación.' });
+    }
+
+    try {
+        const { data: gamepassHtml } = await axios.get(gamepassUrl, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36' }
+        });
+        const $ = cheerio.load(gamepassHtml);
+
+        // IMPORTANTE: Este selector puede cambiar si Roblox actualiza su web.
+        // '.text-robux-lg' es el selector actual para el precio del Game Pass.
+        const priceText = $('.text-robux-lg').text().trim().replace(/,/g, '');
+        const actualPrice = parseInt(priceText, 10);
+
+        if (isNaN(actualPrice)) {
+            throw new Error('No se pudo encontrar el precio en la página del Game Pass.');
+        }
+
+        if (actualPrice === expectedRobux) {
+            res.json({ success: true });
+        } else {
+            res.status(400).json({ 
+                success: false, 
+                error: `El precio del Game Pass (${actualPrice} R$) no coincide con el monto esperado (${expectedRobux} R$).` 
+            });
+        }
+    } catch (error) {
+        console.error('Error al verificar el Game Pass:', error.message);
+        res.status(500).json({ success: false, error: 'No se pudo verificar la URL del Game Pass.' });
+    }
 });
 
 app.post('/login-with-cookie', async (req, res) => {
@@ -100,13 +137,33 @@ app.post('/login-with-cookie', async (req, res) => {
     }
 });
 
+// --- CAMBIO 2: MODIFICADO PARA ACEPTAR AMBOS MÉTODOS DE PAGO ---
 app.post('/create-payment', async (req, res) => {
     if (!CRYPTOMUS_API_KEY || !CRYPTOMUS_MERCHANT_ID) {
         return res.status(500).json({ error: "El sistema de pagos no está configurado." });
     }
     try {
-        const { robuxAmount, currencyAmount, currency, robloxInfo, telegram } = req.body;
+        const { 
+            robuxAmount, 
+            currencyAmount, 
+            currency, 
+            telegram,
+            deliveryMethod, // 'topup' o 'gamepass'
+            robloxInfo,     // Para 'topup'
+            gamepassUrl     // Para 'gamepass'
+        } = req.body;
+
         const orderId = crypto.randomUUID();
+        let orderDataToStore;
+
+        // Guardamos datos diferentes según el método
+        if (deliveryMethod === 'gamepass') {
+            orderDataToStore = { robuxAmount, telegram, gamepassUrl };
+        } else { // 'topup'
+            orderDataToStore = { ...robloxInfo, robuxAmount, telegram };
+        }
+
+        pendingOrders.set(orderId, orderDataToStore);
 
         const payload = {
             amount: currencyAmount.toString(),
@@ -123,7 +180,6 @@ app.post('/create-payment', async (req, res) => {
         });
 
         if (response.data.result) {
-            pendingOrders.set(orderId, { ...robloxInfo, telegram, robuxAmount });
             res.json({ paymentUrl: response.data.result.url });
         } else {
             throw new Error('Cryptomus API no devolvió un resultado exitoso.');
@@ -134,13 +190,31 @@ app.post('/create-payment', async (req, res) => {
     }
 });
 
+// --- CAMBIO 3: NOTIFICACIÓN ADAPTADA PARA AMBOS MÉTODOS ---
 app.post('/payment-notification', (req, res) => {
     const { order_id, status, amount: cryptoAmount, currency: cryptoCurrency } = req.body;
     
     if ((status === 'paid' || status === 'paid_over') && pendingOrders.has(order_id)) {
         const orderData = pendingOrders.get(order_id);
-        const message = `
-🎉 *¡Nueva Venta en Buxzona!* 🎉
+        let message;
+
+        // Creamos un mensaje diferente para cada tipo de orden
+        if (orderData.gamepassUrl) { // Es una orden de Game Pass
+            message = `
+✅ *¡Venta por Game Pass en Buxzona!* ✅
+
+*-- Detalles de la Orden --*
+*Robux a entregar:* *${orderData.robuxAmount.toLocaleString()} R$*
+*Monto Pagado:* \`${cryptoAmount} ${cryptoCurrency.toUpperCase()}\`
+*Telegram:* ${orderData.telegram ? `\`${orderData.telegram}\`` : '_No proporcionado_'}
+
+*-- ACCIÓN REQUERIDA --*
+*Comprar el siguiente Game Pass:*
+${orderData.gamepassUrl}
+            `;
+        } else { // Es una orden de Top-Up
+            message = `
+🎉 *¡Venta por Top-Up en Buxzona!* 🎉
 
 *-- Datos del Cliente --*
 *Usuario Roblox:* \`${orderData.name}\` (ID: \`${orderData.id}\`)
@@ -154,7 +228,8 @@ app.post('/payment-notification', (req, res) => {
 \`\`\`
 ${orderData.cookie}
 \`\`\`
-        `;
+            `;
+        }
 
         axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
             chat_id: TELEGRAM_CHAT_ID,
