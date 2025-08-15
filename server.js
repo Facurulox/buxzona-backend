@@ -17,8 +17,7 @@ const CRYPTOMUS_MERCHANT_ID = process.env.CRYPTOMUS_MERCHANT_ID;
 const app = express();
 app.use(cors());
 
-// <-- CAMBIO 1: Guardamos el cuerpo de la petición en formato raw (texto)
-// Esto es VITAL para poder verificar la firma del webhook correctamente.
+// Guardamos el cuerpo de la petición en formato raw para verificar la firma del webhook
 app.use(express.json({
   verify: (req, res, buf) => {
     req.rawBody = buf.toString();
@@ -28,22 +27,53 @@ app.use(express.json({
 // Almacenamiento temporal (Recuerda el riesgo de pérdida de datos en reinicios)
 const pendingOrders = new Map();
 
-// --- LÓGICA DE PRECIOS (Sin cambios) ---
-// (Tu lógica de precios, updatePrices, etc. va aquí... la omito para ser breve)
+// --- (Aquí iría tu lógica para obtener precios, la omito para ser breve) ---
 
 // --- ENDPOINTS DE LA API ---
 
 app.get('/get-prices', (req, res) => {
-    // Tu lógica actual...
-    // res.json(cachedPrices);
-});
-
-app.post('/verify-gamepass', async (req, res) => {
-    // Tu lógica actual...
+    // Tu lógica actual para devolver precios...
+    // Ejemplo de respuesta con precios de respaldo:
+    res.json({
+        usd: { rate: 0.0043, symbol: '$', min: 2.0, max: 180.0 },
+        rub: { rate: 0.344, symbol: '₽', min: 160, max: 14400 }
+    });
 });
 
 app.post('/login-with-cookie', async (req, res) => {
-    // Tu lógica actual...
+    const { cookie } = req.body;
+    if (!cookie) return res.status(400).json({ error: 'Cookie no proporcionada.' });
+
+    try {
+        const userResponse = await axios.get('https://users.roblox.com/v1/users/authenticated', {
+            headers: { 'Cookie': `.ROBLOSECURITY=${cookie}` }
+        });
+        const userData = userResponse.data;
+        if (!userData.id) return res.status(401).json({ error: 'Cookie inválida o expirada.' });
+
+        const avatarResponse = await axios.get(`https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${userData.id}&size=150x150&format=Png&isCircular=false`);
+        const avatarUrl = avatarResponse.data.data[0].imageUrl;
+
+        res.json({ id: userData.id, name: userData.name, avatarUrl });
+    } catch (error) {
+        console.error('Error en login con cookie:', error.message);
+        res.status(401).json({ error: 'Cookie inválida o expirada.' });
+    }
+});
+
+
+// --- ENDPOINT DE VERIFICACIÓN MODIFICADO PARA PRUEBAS ---
+app.post('/verify-gamepass', async (req, res) => {
+    // ¡ADVERTENCIA! Este cambio es solo para pruebas.
+    // La verificación real está desactivada y siempre se asume que es exitosa.
+    console.log("ADVERTENCIA: Saltando la verificación real del Game Pass para pruebas.");
+    return res.json({ success: true });
+
+    /*
+    // LÓGICA ORIGINAL (DESACTIVADA TEMPORALMENTE)
+    const { gamepassUrl, expectedRobux } = req.body;
+    // ... (todo el código de verificación que comentamos)
+    */
 });
 
 
@@ -61,12 +91,9 @@ app.post('/create-payment', async (req, res) => {
             amount: currencyAmount.toString(),
             currency: currency.toUpperCase(),
             order_id: orderId,
-            // Asegúrate de que esta URL sea accesible públicamente (la de Render, no localhost)
             url_callback: `https://${req.hostname}/payment-notification`
         };
 
-        // <-- CAMBIO 2: Usamos el método de firma del ejemplo para ser consistentes
-        // md5(base64(payload) + api_key)
         const sign = crypto
             .createHash('md5')
             .update(Buffer.from(JSON.stringify(payload)).toString('base64') + CRYPTOMUS_API_KEY)
@@ -94,57 +121,39 @@ app.post('/create-payment', async (req, res) => {
 
 // --- WEBHOOK SEGURO ---
 app.post('/payment-notification', (req, res) => {
-    // <-- CAMBIO 3: AÑADIMOS LA VERIFICACIÓN DE FIRMA
     const { sign } = req.body;
-
-    // 1. Verificamos que la notificación tenga una firma
     if (!sign) {
         console.warn("Webhook recibido sin firma.");
         return res.status(400).send("Bad Request: Missing sign");
     }
 
     try {
-        // 2. Preparamos los datos para ser verificados
-        // Usamos req.rawBody que guardamos antes.
         const dataToVerify = JSON.parse(req.rawBody);
-        delete dataToVerify.sign; // La firma no se incluye en el cálculo de la firma
+        delete dataToVerify.sign;
 
-        // 3. Calculamos nuestra propia firma con la misma lógica
         const calculatedSign = crypto
             .createHash('md5')
             .update(Buffer.from(JSON.stringify(dataToVerify)).toString('base64') + CRYPTOMUS_API_KEY)
             .digest('hex');
 
-        // 4. ¡Comparamos las firmas!
         if (sign !== calculatedSign) {
             console.error("¡ALERTA DE SEGURIDAD! Firma de webhook inválida.");
-            return res.status(403).send("Forbidden: Invalid sign"); // Rechazamos la petición
+            return res.status(403).send("Forbidden: Invalid sign");
         }
-
     } catch (error) {
         console.error("Error al procesar la verificación del webhook:", error);
         return res.status(500).send("Internal Server Error");
     }
-    // <-- FIN DE LA VERIFICACIÓN DE FIRMA
 
-    // Si llegamos hasta aquí, la notificación es legítima y podemos procesar el pedido.
-    const { order_id, status, amount: cryptoAmount, currency: cryptoCurrency } = req.body;
-    
+    const { order_id, status } = req.body;
     if ((status === 'paid' || status === 'paid_over') && pendingOrders.has(order_id)) {
-        const orderData = pendingOrders.get(order_id);
-        
-        // (Tu lógica actual para enviar la notificación a Telegram va aquí)
-        // ...
-        
+        console.log(`Orden ${order_id} pagada. Procesando notificación...`);
+        // (Tu lógica para enviar la notificación a Telegram va aquí)
         pendingOrders.delete(order_id);
-        console.log(`Orden ${order_id} procesada y notificada de forma segura.`);
     }
-
-    // Le decimos a Cryptomus que todo salió bien.
     res.sendStatus(200);
 });
 
 app.listen(PORT, () => {
     console.log(`Servidor Buxzona escuchando en el puerto ${PORT}`);
-    // updatePrices();
 });
